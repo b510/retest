@@ -10,7 +10,7 @@ PROJECTS = ROOT / "projects"
 CONFIG_PATH = ROOT / "config.json"
 _lock = threading.Lock()
 
-STAGES = ["uploaded", "extract", "agent", "poc_run", "screenshot", "report", "done"]
+STAGES = ["uploaded", "extract", "agent", "poc_run", "screenshot", "cleanup", "report", "done"]
 STAGE_LABEL = {
     "created": "已建立，等待上傳",
     "uploaded": "已上傳，等待開始",
@@ -18,6 +18,7 @@ STAGE_LABEL = {
     "agent": "AI 複測與重構 POC",
     "poc_run": "框架最終執行 POC",
     "screenshot": "產生 POC 截圖",
+    "cleanup": "清理目標足跡",
     "report": "產生報告與打包",
     "done": "完成",
     "failed": "失敗",

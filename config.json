@@ -7,7 +7,7 @@
   "chromium": "/usr/bin/chromium",
   "host": "127.0.0.1",
   "port": 8780,
-  "auth": "auto",
+  "auth": "on",
   "token_ttl_sec": 30,
   "session_hours": 10,
   "ssl_cert": "",

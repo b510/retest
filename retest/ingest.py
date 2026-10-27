@@ -13,11 +13,12 @@ REPORT_EXT = {".pdf", ".md", ".html", ".htm"}
 SCRIPT_EXT = {".py", ".sh"}
 
 TARGET_URL_RE = re.compile(r"\b(https?|wss?)://([A-Za-z0-9.\-]+|\[[0-9a-fA-F:]+\])(?::(\d{1,5}))?", re.I)
-# 報告裡常見的參考連結，不是受測目標
-REFERENCE_HOSTS = ("owasp.org", "mitre.org", "nist.gov", "cve.org", "github.com", "githubusercontent.com",
-                   "w3.org", "microsoft.com", "mozilla.org", "portswigger.net", "google.com", "googleapis.com",
-                   "gstatic.com", "cloudflare.com", "jsdelivr.net", "unpkg.com", "wikipedia.org", "example.com",
-                   "example.org", "schema.org", "apache.org", "python.org", "readthedocs.io")
+# 報告裡的文件參考連結，不是受測目標（資產、設定外洩所在的第三方主機不在此列，照樣複測）
+REFERENCE_HOSTS = ("owasp.org", "mitre.org", "nist.gov", "cve.org", "first.org", "w3.org", "mozilla.org",
+                   "portswigger.net", "wikipedia.org", "schema.org", "apache.org", "python.org", "readthedocs.io",
+                   "hackerone.com", "cwe.mitre.org", "rfc-editor.org", "ietf.org")
+# 報告用來示意的佔位主機，送請求沒有意義
+PLACEHOLDER_RE = re.compile(r"(^|\.)(example\.(com|org|net)|[a-z0-9-]+\.(example|invalid|test))$|^(attacker|evil)\.", re.I)
 DEFAULT_PORT = {"http": "80", "ws": "80", "https": "443", "wss": "443"}
 
 
@@ -95,22 +96,24 @@ def html_to_text(raw: str) -> str:
 def derive_targets(input_dir: Path, text_dir: Path) -> list[str]:
     """從報告純文字與複測腳本中找出受測目標（host 或 host:port）。
 
-    本機位址一律帶 port（沒寫就用協定預設 port），對應 scope_guard 的本機規則。
+    報告與腳本裡出現的主機都視為授權範圍（報告就是授權測試的結果），只排除文件參考連結與佔位主機。
+    本機位址只有在報告沒有其他目標時才納入（例如本機靶站），且一律帶 port；
+    否則報告裡的 127.0.0.1 指的是目標自己的本機（SSRF payload），從這台機器送出會打到別的服務。
     """
-    found = set()
+    found, local = set(), set()
     files = list(text_dir.glob("*.txt")) + [p for p in input_dir.rglob("*") if p.suffix.lower() in SCRIPT_EXT]
     for f in files:
         for m in TARGET_URL_RE.finditer(f.read_text(errors="replace")):
-            scheme, host, port = m.group(1).lower(), m.group(2).lower().strip("."), m.group(3)
+            scheme, host, port = m.group(1).lower(), m.group(2).lower().strip(".-"), m.group(3)
             if not host or "." not in host and host != "localhost" and not host.startswith("["):
                 continue
-            if any(host == r or host.endswith("." + r) for r in REFERENCE_HOSTS):
+            if any(host == r or host.endswith("." + r) for r in REFERENCE_HOSTS) or PLACEHOLDER_RE.search(host):
                 continue
-            local = host in ("localhost", "[::1]") or host.startswith("127.")
-            if local and not port:
-                port = DEFAULT_PORT[scheme]
+            if host in ("localhost", "[::1]") or host.startswith("127."):
+                local.add(f"{host}:{port or DEFAULT_PORT[scheme]}")
+                continue
             found.add(f"{host}:{port}" if port else host)
-    return sorted(found)
+    return sorted(found) or sorted(local)
 
 
 def extract_texts(files: list[Path], input_dir: Path, text_dir: Path) -> dict:
