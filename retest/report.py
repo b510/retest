@@ -139,7 +139,8 @@ def build(pid: str, findings: list[dict], platform: dict, cleanup: dict | None =
 <div class="kpi"><b>{len(findings)}</b>複測項目（中風險以上）</div>
 <div class="kpi"><b style="color:var(--high)">{counts['仍存在']}</b>仍存在</div>
 <div class="kpi"><b style="color:var(--ok)">{counts['已修復']}</b>已修復</div>
-<div class="kpi"><b>{counts['無法判定'] + counts['需人工複測']}</b>無法判定 / 需人工</div>
+<div class="kpi"><b>{counts['需人工複測']}</b>需人工複測</div>
+{f'<div class="kpi"><b>{counts["無法判定"]}</b>無法判定</div>' if counts['無法判定'] else ''}
 </div>{blocked}
 
 <h2 id="s2">2. 漏洞總表</h2>

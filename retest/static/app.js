@@ -57,7 +57,8 @@ function render(m) {
     const s = m.summary;
     res.querySelector(".kpis").innerHTML =
       `<div><b>${s.total}</b>複測項目</div><div><b style="color:var(--danger)">${s["仍存在"]}</b>仍存在</div>` +
-      `<div><b style="color:var(--ok)">${s["已修復"]}</b>已修復</div><div><b>${s["無法判定"] + s["需人工複測"]}</b>無法判定/需人工</div>`;
+      `<div><b style="color:var(--ok)">${s["已修復"]}</b>已修復</div><div><b>${s["需人工複測"]}</b>需人工複測</div>` +
+      (s["無法判定"] ? `<div><b>${s["無法判定"]}</b>無法判定</div>` : "");
     res.querySelector(".act-report").href = `/api/projects/${m.id}/report`;
     res.querySelector(".act-zip").href = `/api/projects/${m.id}/download`;
   }
