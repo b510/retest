@@ -6,5 +6,10 @@
   "poc_timeout_sec": 300,
   "chromium": "/usr/bin/chromium",
   "host": "127.0.0.1",
-  "port": 8780
+  "port": 8780,
+  "auth": "auto",
+  "token_ttl_sec": 30,
+  "session_hours": 10,
+  "ssl_cert": "",
+  "ssl_key": ""
 }

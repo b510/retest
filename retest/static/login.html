@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Retest 登入</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.login{max-width:420px;margin:12vh auto;padding:0 16px}
+.err{color:var(--danger);margin:8px 0}
+</style>
+</head>
+<body>
+<div class="login card">
+  <h2>Retest 登入</h2>
+  <p class="muted">請在伺服器上執行 <code>python3 -m retest token</code> 取得一次性 token。登入後 session 有效 10 小時。</p>
+  <div class="err"><!--ERROR--></div>
+  <form id="f">
+    <label>一次性 token<input name="token" autocomplete="off" required autofocus></label>
+    <div class="row"><button class="primary">登入</button></div>
+  </form>
+</div>
+<script>
+document.getElementById("f").onsubmit = async e => {
+  e.preventDefault();
+  const r = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token: e.target.token.value.trim() }) });
+  if (r.ok) location.href = "/";
+  else document.querySelector(".err").textContent = (await r.json().catch(() => ({}))).detail || "登入失敗";
+};
+</script>
+</body>
+</html>

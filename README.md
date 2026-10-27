@@ -13,8 +13,24 @@
 ## 啟動
 
 ```bash
-bash run.sh          # http://127.0.0.1:8780
+bash run.sh                     # 本機：http://127.0.0.1:8780（不需登入）
+bash run.sh --host 0.0.0.0      # 公網：強制一次性 token 登入
 ```
+
+### 公網存取（同 RedFrame 作法）
+
+綁非本機位址時自動開啟登入驗證（`config.json` 的 `auth`：`auto` / `on` / `off`；`off` 時拒絕綁公網）。
+
+1. 在伺服器本機簽發一次性登入連結：
+   ```bash
+   python3 -m retest token --url https://<外部位址>:8780
+   ```
+   token 預設 30 秒內有效、只能使用一次（`token_ttl_sec`）。
+2. 瀏覽器開啟連結後換發 HttpOnly session cookie，**從登入起算固定 10 小時到期，不續期**（`session_hours`），
+   到期後需重新簽發 token。右上角「登出」會立即註銷 session。
+3. 建議走 HTTPS：在 `config.json` 填 `ssl_cert` / `ssl_key`（可用 RedFrame 的 `scripts/gen_selfsigned.sh` 產生自簽憑證），
+   或放在 Caddy / Cloudflare Tunnel 後面。
+4. 登入錯誤每 IP 每分鐘最多 5 次，連續失敗 5 次鎖 5 分鐘。session 只存 SHA-256 雜湊於 `auth.json`（0600，不進版控）。
 
 需求：python3（fastapi、uvicorn、python-multipart、pillow）、`claude` CLI、chromium、pdftotext。
 
@@ -35,7 +51,7 @@ bash run.sh          # http://127.0.0.1:8780
   本機位址（127.0.0.1 / localhost）必須明確寫 port 才放行，因為這台機器上其他服務有真實客戶資料。
 - AI 被使用政策或分類器擋下時，框架**只記錄、不換模型重試**。已完成的項目照常產出，未完成的標示「需人工複測」。
 - 上傳內容視為不可信資料；POC 只證明、不破壞。
-- Web 前台預設只綁 127.0.0.1，沒有登入機制。要開給別人用請自行加反向代理和驗證。
+- Web 前台預設只綁 127.0.0.1；綁公網時強制一次性 token 登入（見上方「公網存取」）。
 
 ## 專案資料夾 `projects/<id>/`
 
