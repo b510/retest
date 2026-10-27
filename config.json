@@ -1,0 +1,10 @@
+{
+  "model": "claude-opus-4-8",
+  "effort": "xhigh",
+  "claude_bin": "claude",
+  "agent_timeout_min": 240,
+  "poc_timeout_sec": 300,
+  "chromium": "/usr/bin/chromium",
+  "host": "127.0.0.1",
+  "port": 8780
+}

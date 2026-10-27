@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Retest 漏洞複測</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Retest <span>Web 漏洞複測框架</span></h1>
+  <button id="btnCfg" class="ghost">設定</button>
+</header>
+<div class="layout">
+  <aside>
+    <button id="btnNew" class="primary full">＋ 建立複測專案</button>
+    <ul id="plist"></ul>
+  </aside>
+  <main id="main">
+    <div class="empty">從左側選擇專案，或建立新的複測專案。</div>
+  </main>
+</div>
+
+<dialog id="dlgNew">
+  <form method="dialog" id="formNew">
+    <h2>建立複測專案</h2>
+    <label>專案名稱<input name="name" required placeholder="例如：XX 商城 2026Q4 複測"></label>
+    <label>附件（zip：報告 PDF / MD / HTML 與複測腳本 py / sh）<input name="zip" type="file" accept=".zip" required></label>
+    <label class="check"><input name="authorized" type="checkbox" required> 本次複測是在已授權的情況下進行，僅針對所提供附件進行複測</label>
+    <p class="hint">複測範圍會從報告中的目標網址自動辨識。建立後立即開始複測。</p>
+    <div class="row"><button value="cancel" class="ghost">取消</button><button id="btnCreate" value="ok" class="primary">建立並開始複測</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlgCfg">
+  <form method="dialog" id="formCfg">
+    <h2>框架設定</h2>
+    <label>模型<input name="model"></label>
+    <label>推理強度
+      <select name="effort"><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+    <label>AI 複測時限（分鐘）<input name="agent_timeout_min" type="number" min="10"></label>
+    <label>單一 POC 時限（秒）<input name="poc_timeout_sec" type="number" min="10"></label>
+    <div class="row"><button value="cancel" class="ghost">取消</button><button id="btnSaveCfg" value="ok" class="primary">儲存</button></div>
+  </form>
+</dialog>
+
+<template id="tplProject">
+  <section class="proj">
+    <div class="phead">
+      <div><h2 class="pname"></h2><div class="pmeta muted"></div></div>
+      <span class="stage"></span>
+    </div>
+    <div class="stages"></div>
+    <div class="card">
+      <h3>1. 上傳原始報告與複測腳本（zip）</h3>
+      <p class="muted">zip 內可含 PDF / MD / HTML 報告，以及 .py / .sh 複測腳本。</p>
+      <div class="drop"><input type="file" accept=".zip" class="file"><span class="upname muted"></span></div>
+    </div>
+    <div class="card">
+      <h3>2. 執行複測</h3>
+      <div class="row left">
+        <button class="primary act-run">開始複測</button>
+        <button class="ghost act-resume" title="沿用已解壓的資料與 AI 已完成的進度">續跑</button>
+        <button class="danger act-stop">停止</button>
+      </div>
+      <div class="alert hidden"></div>
+      <pre class="log"></pre>
+    </div>
+    <div class="card result hidden">
+      <h3>3. 交付</h3>
+      <div class="kpis"></div>
+      <div class="row left"><a class="btn primary act-report" target="_blank">開啟報告</a><a class="btn ghost act-zip">下載交付包（報告 + POC）</a></div>
+    </div>
+  </section>
+</template>
+<script src="/static/app.js"></script>
+</body>
+</html>
