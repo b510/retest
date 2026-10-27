@@ -3,6 +3,7 @@ let current = null, logOffset = 0, timer = null;
 
 const api = async (path, opts = {}) => {
   const r = await fetch(path, opts);
+  if (r.status === 401) { location.href = "/login"; throw new Error("session 已過期，請重新登入"); }
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
   return r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
 };
@@ -133,4 +134,5 @@ document.getElementById("btnSaveCfg").onclick = async e => {
   await api("/api/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   document.getElementById("dlgCfg").close();
 };
+api("/api/auth/status").then(s => document.getElementById("btnLogout").classList.toggle("hidden", !s.auth));
 loadList();

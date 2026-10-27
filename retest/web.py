@@ -1,17 +1,101 @@
 """Web 前台與 API。"""
+import os
 import shutil
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import pipeline, store
+from . import auth, pipeline, store
 
 STATIC = Path(__file__).resolve().parent / "static"
-app = FastAPI(title="Retest")
+app = FastAPI(title="Retest", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+# __main__ 啟動前把實際 bind host 寫進 RETEST_BIND；綁公網時強制登入
+AUTH_ON = auth.enabled(os.environ.get("RETEST_BIND", "127.0.0.1"))
+PUBLIC_PATHS = {"/login", "/api/auth/login", "/static/style.css"}
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if AUTH_ON and path not in PUBLIC_PATHS and not auth.check_session(request.cookies.get(auth.COOKIE)):
+        if path.startswith("/api/"):
+            return JSONResponse({"detail": "未登入或 session 已過期"}, status_code=401)
+        return RedirectResponse("/login", status_code=302)
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    return resp
+
+
+def _client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else ""
+    if peer in ("127.0.0.1", "::1"):  # 經本機反向代理/隧道時才採信轉發標頭
+        fwd = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
+    return peer or "unknown"
+
+
+def _login(request: Request, token: str, resp):
+    ip = _client_ip(request)
+    if not auth.throttle_ok(ip):
+        raise HTTPException(429, "嘗試次數過多，請 5 分鐘後再試")
+    got = auth.consume_token(token.strip())
+    auth.record_attempt(ip, bool(got))
+    if not got:
+        return None
+    session, expires = got
+    secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    resp.set_cookie(auth.COOKIE, session, httponly=True, samesite="lax", secure=secure,
+                    max_age=int(expires - time.time()))
+    return resp
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, t: str = ""):
+    if not AUTH_ON:
+        return RedirectResponse("/")
+    error = ""
+    if t:
+        resp = _login(request, t, RedirectResponse("/", status_code=302))
+        if resp:
+            return resp
+        error = "登入 token 無效、已使用或已過期。"
+    return (STATIC / "login.html").read_text().replace("<!--ERROR-->", error)
+
+
+class LoginIn(BaseModel):
+    token: str
+
+
+@app.post("/api/auth/login")
+def login_api(body: LoginIn, request: Request):
+    if not AUTH_ON:
+        return {"status": "auth-disabled"}
+    resp = _login(request, body.token, JSONResponse({"status": "ok"}))
+    if not resp:
+        raise HTTPException(401, "登入 token 無效、已使用或已過期")
+    return resp
+
+
+@app.get("/api/auth/logout")
+def logout(request: Request):
+    auth.drop_session(request.cookies.get(auth.COOKIE))
+    resp = RedirectResponse("/login" if AUTH_ON else "/", status_code=302)
+    resp.delete_cookie(auth.COOKIE)
+    return resp
+
+
+@app.get("/api/auth/status")
+def auth_status():
+    return {"auth": AUTH_ON}
 
 
 class NewProject(BaseModel):

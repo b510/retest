@@ -2,3 +2,6 @@
 projects/
 __pycache__/
 *.pyc
+auth.json
+web.log
+cloudflared.log
