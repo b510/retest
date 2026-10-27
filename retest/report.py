@@ -57,7 +57,7 @@ document.querySelectorAll('tr.vrow').forEach(r=>r.classList.toggle('hidden',v&&!
 """
 
 
-def build(pid: str, findings: list[dict], platform: dict) -> Path:
+def build(pid: str, findings: list[dict], platform: dict, cleanup: dict | None = None) -> Path:
     meta = store.get(pid)
     d = store.pdir(pid)
     out = d / "output"
@@ -106,12 +106,30 @@ def build(pid: str, findings: list[dict], platform: dict) -> Path:
     ) if x)
     blocked = f'<p><b>注意：</b>AI 複測過程未完整結束（{E(meta["blocked"])}），未完成的項目已標示為「需人工複測」。</p>' if meta.get("blocked") else ""
 
+    created = (cleanup or {}).get("created") or []
+    cleanup_html = cleanup_nav = ""
+    if created:
+        left = [c for c in created if not c.get("restored")]
+        crows = "".join(
+            f"<tr><td>{E(c.get('type', ''))}</td><td><code>{E(str(c.get('ref', '')))}</code></td><td>{E(c.get('host', ''))}</td>"
+            f"<td>{E(c.get('by', ''))}</td>"
+            f"<td><span class=\"badge {'st-fixed' if c.get('restored') else 'st-manual'}\">{'已清除' if c.get('restored') else '待人工清除'}</span></td>"
+            f"<td>{E(c.get('note', ''))}</td></tr>" for c in created)
+        note = (f"複測在目標上新建/竄改了 {len(created)} 筆資料，已自動清除 {len(created) - len(left)} 筆。"
+                + (f"<b>尚有 {len(left)} 筆需管理員手動刪除（見下表「待人工清除」）。</b>" if left else "全部已清除。"))
+        cleanup_html = f"""
+<h2 id="s4">4. 足跡清理</h2>
+<div class="card"><p>{note}</p>
+<table class="sum"><thead><tr><th>類型</th><th>識別</th><th>主機</th><th>來源</th><th>狀態</th><th>說明</th></tr></thead><tbody>{crows}</tbody></table>
+{_img(out / 'screenshots' / 'cleanup.png') if (cleanup or {}).get('screenshot') else ''}</div>"""
+        cleanup_nav = '<a href="#s4">4. 足跡清理</a>'
+
     doc = f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{E(meta['name'])}</title><style>{CSS}</style></head><body>
 <nav id="toc"><h2>索引</h2><input id="q" placeholder="搜尋漏洞（編號、名稱、類型、狀態）">
 <div class="sec">章節</div>
 <a href="#s1">1. 複測摘要</a><a href="#s2">2. 漏洞總表</a><a href="#s3">3. 漏洞詳情</a>
-<div class="sub">{nav_v}</div></nav>
+<div class="sub">{nav_v}</div>{cleanup_nav}</nav>
 <main>
 <h1>{E(meta['name'])}</h1>
 <p class="muted">{sub}</p>
@@ -129,6 +147,7 @@ def build(pid: str, findings: list[dict], platform: dict) -> Path:
 
 <h2 id="s3">3. 漏洞詳情</h2>
 {''.join(details)}
+{cleanup_html}
 </main><script>{JS}</script></body></html>"""
     out.mkdir(parents=True, exist_ok=True)
     rp = out / "report.html"
@@ -141,7 +160,10 @@ def rebuild(pid: str) -> Path:
     d = store.pdir(pid)
     findings = json.loads((d / "final_findings.json").read_text())
     data = json.loads((d / "work" / "findings.json").read_text())
-    build(pid, findings, data.get("platform") or {})
+    cleanup = None
+    if (d / "cleanup_result.json").exists():
+        cleanup = json.loads((d / "cleanup_result.json").read_text())
+    build(pid, findings, data.get("platform") or {}, cleanup)
     return package(pid, findings)
 
 
@@ -159,4 +181,8 @@ def package(pid: str, findings: list[dict]) -> Path:
                 z.write(p, f"pocs/{p.name}")
         for p in sorted((out / "screenshots").glob("*.png")):
             z.write(p, f"screenshots/{p.name}")
+        if (work / "cleanup.sh").exists():
+            z.write(work / "cleanup.sh", "cleanup.sh")
+        if (work / "created.json").exists():
+            z.write(work / "created.json", "created.json")
     return zp

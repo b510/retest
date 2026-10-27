@@ -34,6 +34,40 @@ def _check_stop(pid):
         raise InterruptedError
 
 
+def _run_cleanup(pid: str, work, out) -> dict:
+    """複測後執行 AI 產生的 cleanup.sh，清掉在目標上留下的足跡，並整理清單。"""
+    created = []
+    cj = work / "created.json"
+    if cj.exists():
+        try:
+            created = json.loads(cj.read_text())
+        except json.JSONDecodeError:
+            created = []
+    script = work / "cleanup.sh"
+    result = {"created": created, "ran": False, "status": None, "output": ""}
+    if not created and not script.exists():
+        store.log(pid, "🧹 複測未在目標上新建/竄改資料，無須清理")
+        return result
+    if not script.exists():
+        store.log(pid, f"⚠️ 有 {len(created)} 筆足跡但缺 cleanup.sh，全數留待人工清理")
+        result["status"] = "需人工清理"
+        return result
+    store.log(pid, f"🧹 執行足跡清理：bash cleanup.sh（{len(created)} 筆）")
+    r = evidence.run_poc(pid, work, "cleanup.sh")
+    result.update(ran=True, status=r["status"], output=r["output"])
+    (out / "cleanup.log").write_text(r["output"])
+    if evidence.screenshot("$ bash cleanup.sh   —   足跡清理", r["output"], out / "screenshots" / "cleanup.png"):
+        result["screenshot"] = "cleanup.png"
+    # 重讀 created.json（cleanup.sh 會把已還原的標 restored:true）
+    try:
+        result["created"] = json.loads(cj.read_text())
+    except Exception:
+        pass
+    left = [c for c in result["created"] if not c.get("restored")]
+    store.log(pid, f"🧹 清理完成：{len(result['created']) - len(left)} 已清除，{len(left)} 待人工清除")
+    return result
+
+
 def _run(pid: str, resume: bool) -> None:
     d = store.pdir(pid)
     try:
@@ -96,7 +130,10 @@ def _run(pid: str, resume: bool) -> None:
                 continue
             store.log(pid, f"▶️ 框架重跑 {f['id']}：bash {f['poc']}")
             r = evidence.run_poc(pid, work, f["poc"])
-            f.update(final_status=r["status"], poc_rc=r["rc"], poc_secs=r["secs"])
+            status = r["status"]
+            if status == "無法判定" and f.get("agent_status") == "需人工複測":
+                status = "需人工複測"  # POC 刻意停在前置檢查（白名單、寫入、範圍外），沿用 AI 的分類
+            f.update(final_status=status, poc_rc=r["rc"], poc_secs=r["secs"])
             (out / f"{f['id']}.log").write_text(r["output"])
             store.log(pid, f"   → {r['status']}（rc={r['rc']}，{r['secs']}s）")
 
@@ -114,8 +151,12 @@ def _run(pid: str, resume: bool) -> None:
             else:
                 store.log(pid, f"⚠️ {f['id']} 截圖失敗")
 
+        store.update(pid, stage="cleanup")
+        cleanup = _run_cleanup(pid, work, out)
+        (d / "cleanup_result.json").write_text(json.dumps(cleanup, ensure_ascii=False, indent=2))
+
         store.update(pid, stage="report")
-        report.build(pid, findings, data.get("platform") or {})
+        report.build(pid, findings, data.get("platform") or {}, cleanup)
         zp = report.package(pid, findings)
         (d / "final_findings.json").write_text(json.dumps(findings, ensure_ascii=False, indent=2))
         summary = {s: sum(1 for f in findings if f["final_status"] == s) for s in report.STATUS_CLASS}

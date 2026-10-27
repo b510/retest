@@ -1,4 +1,4 @@
-const STAGES = [["extract", "解析報告"], ["agent", "AI 複測"], ["poc_run", "重跑 POC"], ["screenshot", "截圖"], ["report", "報告"], ["done", "完成"]];
+const STAGES = [["extract", "解析報告"], ["agent", "AI 複測"], ["poc_run", "重跑 POC"], ["screenshot", "截圖"], ["cleanup", "清理足跡"], ["report", "報告"], ["done", "完成"]];
 let current = null, logOffset = 0, timer = null;
 
 const api = async (path, opts = {}) => {

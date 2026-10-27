@@ -72,15 +72,30 @@ def allowed(host: str, port, targets) -> bool:
     return False
 
 
-def hosts_in(text: str):
+# Origin / Referer 標頭的值只是送給目標的字串（CORS、CSRF 測試），不會連線到該主機
+HEADER_VALUE_RES = [
+    re.compile(r"""(?:-H|--header)\s*(['"])\s*(?:Origin|Referer)\s*:[^'"]*\1""", re.I),
+    re.compile(r"""(?:-e|--referer)\s+(['"]?)\S+?\1(?=\s|$)"""),
+    re.compile(r"""(['"])(?:Origin|Referer)\1\s*:\s*(['"])[^'"]*\2""", re.I),
+]
+
+
+def hosts_in(text: str, bare_hosts: bool = True):
+    for rx in HEADER_VALUE_RES:
+        text = rx.sub(" ", text)
     found = []
     for m in URL_RE.finditer(text):
         hp = m.group(1)
         if "$" in hp or "{" in hp:
             continue  # 變數，交給檔案內容掃描
-        found.append(split_hostport(hp))
-    for m in HOSTPORT_RE.finditer(URL_RE.sub(" ", text)):
-        found.append((m.group(1).lower(), m.group(2)))
+        host, port = split_hostport(hp)
+        if not host or re.search(r"[\^*+()|\[\]]", host):
+            continue  # grep/sed 正規表示式片段（例如 https://[^ ]+），不是可連線的主機
+        found.append((host, port))
+    # 裸 IP / localhost 只看指令本身；檔案內容裡的裸 IP 多半是說明文字（例如出口 IP），不是連線目標
+    if bare_hosts:
+        for m in HOSTPORT_RE.finditer(URL_RE.sub(" ", text)):
+            found.append((m.group(1).lower(), m.group(2)))
     return found
 
 
@@ -105,7 +120,7 @@ def main():
 
     bad = []
     for src, text in texts:
-        for host, port in hosts_in(text):
+        for host, port in hosts_in(text, bare_hosts=(src == "指令")):
             if host in ("0.0.0.0",) or host.startswith("255."):
                 continue
             if not allowed(host, port, targets):
