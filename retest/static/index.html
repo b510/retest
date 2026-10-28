@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Retest 漏洞複測</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 <header>
-  <h1>Retest <span>Web 漏洞複測框架</span></h1>
+  <h1>Retest <span>Web 漏洞複測框架</span><span class="ver" id="ver"></span></h1>
   <div><button id="btnCfg" class="ghost">設定</button> <a id="btnLogout" class="btn ghost hidden" href="/api/auth/logout">登出</a></div>
 </header>
 <div class="layout">
@@ -25,10 +25,11 @@
   <form method="dialog" id="formNew">
     <h2>建立複測專案</h2>
     <label>專案名稱<input name="name" required placeholder="例如：XX 商城 2026Q4 複測"></label>
-    <label>附件（zip：報告 PDF / MD / HTML 與複測腳本 py / sh）<input name="zip" type="file" accept=".zip" required></label>
+    <label>附件（可選，可多檔：報告 PDF/MD/HTML 或複測腳本 PY/SH，或 zip）<input name="zip" type="file" accept=".zip,.pdf,.md,.html,.htm,.py,.sh,.txt" multiple></label>
     <label class="check"><input name="authorized" type="checkbox" required> 本次複測是在已授權的情況下進行，僅針對所提供附件進行複測</label>
-    <p class="hint">複測範圍會從報告中的目標網址自動辨識。建立後立即開始複測。</p>
-    <div class="row"><button value="cancel" class="ghost">取消</button><button id="btnCreate" value="ok" class="primary">建立並開始複測</button></div>
+    <label class="check"><input name="allow_fin_write" type="checkbox"> 已授權「可逆金流寫入」：允許對自建測試帳號實際執行儲值竄改／負數鑄幣／改密等可還原寫入（測後自動清理）。不可逆動作（提現付款、破壞性 SQL）一律仍只證明到安全邊界</label>
+    <p class="hint">可先建立空專案，之後在專案頁陸續上傳多份（支援跨 session 累積），全部到齊再手動開始複測。範圍以報告為準。</p>
+    <div class="row"><button value="cancel" class="ghost">取消</button><button id="btnCreate" value="ok" class="primary">建立專案</button></div>
   </form>
 </dialog>
 
@@ -48,13 +49,14 @@
   <section class="proj">
     <div class="phead">
       <div><h2 class="pname"></h2><div class="pmeta muted"></div></div>
-      <span class="stage"></span>
+      <div class="phead-r"><span class="stage"></span><button class="ghost act-delete" title="永久刪除此專案與其所有上傳檔案">刪除專案</button></div>
     </div>
     <div class="stages"></div>
     <div class="card">
-      <h3>1. 上傳原始報告與複測腳本（zip）</h3>
-      <p class="muted">zip 內可含 PDF / MD / HTML 報告，以及 .py / .sh 複測腳本。</p>
-      <div class="drop"><input type="file" accept=".zip" class="file"><span class="upname muted"></span></div>
+      <h3>1. 上傳原始報告與複測腳本</h3>
+      <p class="muted">可多檔、可分次上傳（zip 或散檔 PDF / MD / HTML / PY / SH）；支援跨 session 累積，全部到齊再開始複測。</p>
+      <div class="drop"><input type="file" multiple accept=".zip,.pdf,.md,.html,.htm,.py,.sh,.txt" class="file"><span class="upname muted"></span></div>
+      <ul class="uplist"></ul>
     </div>
     <div class="card">
       <h3>2. 執行複測</h3>
@@ -73,6 +75,6 @@
     </div>
   </section>
 </template>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

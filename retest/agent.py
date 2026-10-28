@@ -42,15 +42,34 @@ def prepare_workdir(pid: str, inventory: dict) -> Path:
         for o in inventory["others"][:50]:
             yield f"  - 其他 `{o}`"
 
+    if meta.get("allow_fin_write"):
+        fin_policy = ("本專案**已授權「可逆金流寫入」**。可實際執行到證明成立：儲值金額竄改類送出被改金額的建單請求、停在未付款；"
+                      "負數鑄幣/餘額竄改類**只對你自己用漏洞建立的測試帳號**打，證明餘額確實變動後反向還原；改密/重置類只對自己的測試帳號。"
+                      "每一筆改動逐筆記 `created.json`，由 `cleanup.sh` 還原並刪除測試帳號。仍受上面「不可逆動作」底線約束。")
+    else:
+        fin_policy = "**未授權金流寫入**：儲值/鑄幣/改餘額等金流寫入只證明端點可達即停，不實際改動餘額或建單，判 `vulnerable` 並在 `notes` 註明「僅證明可達」。"
     task = (ASSETS / "TASK.md").read_text().format(
         name=meta["name"],
         targets="\n".join(f"- `{t}`" for t in meta["targets"]),
         input_dir=d / "input",
         text_dir=d / "input_text",
         inventory="\n".join(inv_lines()) or "  （無）",
+        fin_policy=fin_policy,
     )
     (work / "TASK.md").write_text(task)
     return work
+
+
+# 控制流量（Claude CLI → Anthropic）必須直連，不經代理；只有目標請求（curl 等子程序）走代理
+NO_PROXY_CTRL = ("anthropic.com,.anthropic.com,api.anthropic.com,claude.ai,.claude.ai,"
+                 "statsig.anthropic.com,sentry.io,localhost,127.0.0.1,::1")
+
+
+def proxy_env(proxy: str | None) -> dict:
+    """目標流量走 SOCKS 代理（curl 原生吃 ALL_PROXY，POC 無須寫 -x），Anthropic 控制流量直連。"""
+    if not proxy:
+        return {}
+    return {"ALL_PROXY": proxy, "all_proxy": proxy, "NO_PROXY": NO_PROXY_CTRL, "no_proxy": NO_PROXY_CTRL}
 
 
 def _short(s, n=300):
@@ -98,8 +117,15 @@ def run(pid: str, work: Path, resume: bool = False) -> dict:
     cfg = store.load_config()
     d = store.pdir(pid)
     prompt = "請閱讀當前目錄的 TASK.md 並完整執行其中的複測任務。"
-    if resume and (work / "findings.json").exists():
-        prompt += "注意：findings.json 已存在，這是中斷後的續跑，請接續未完成的項目。"
+    if resume:
+        pocs = sorted(p.name for p in (work / "pocs").glob("*.sh")) if (work / "pocs").exists() else []
+        if (work / "findings.json").exists():
+            prompt += "注意：findings.json 已存在，這是中斷後的續跑，請接續未完成的項目，不要重做已完成且有 POC 的項目。"
+        elif pocs:
+            prompt += (f"注意：這是中斷後的續跑。先前已完成 {len(pocs)} 支 POC（在 pocs/：{', '.join(pocs)}），"
+                       "以及 scratch/ 下的工作筆記（如 master_findings.md）。請**先盤點既有 POC 與筆記**，"
+                       "接續完成剩餘漏洞的複測，**不要重做已經有 POC 的項目**（尤其是會在目標上重複建帳號/寫入的），"
+                       "然後把全部結果彙整寫出 findings.json。")
     cmd = [
         cfg["claude_bin"], "-p", prompt,
         "--model", cfg["model"], "--effort", cfg["effort"],
@@ -114,7 +140,7 @@ def run(pid: str, work: Path, resume: bool = False) -> dict:
     raw = open(d / "agent.jsonl", "a", encoding="utf-8")
     proc = subprocess.Popen(cmd, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, text=True, start_new_session=True,
-                            env={**os.environ, "POC_COLOR": "1"})
+                            env={**os.environ, "POC_COLOR": "1", **proxy_env(store.get(pid).get("proxy"))})
     _procs[pid] = proc
     deadline = time.time() + cfg["agent_timeout_min"] * 60
     result = {"ok": False, "blocked": None, "result_text": "", "session_id": None}

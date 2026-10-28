@@ -36,10 +36,12 @@ def run_poc(pid: str, work: Path, poc_rel: str) -> dict:
         return {"rc": None, "status": "需人工複測", "output": f"找不到 POC：{poc_rel}", "secs": 0}
     if err := scope_check(script, work):
         return {"rc": None, "status": "需人工複測", "output": err, "secs": 0}
+    from .agent import proxy_env
     t0 = time.time()
     try:
         r = subprocess.run(["bash", str(script)], cwd=script.parent, capture_output=True, text=True,
-                           timeout=cfg["poc_timeout_sec"], env={**os.environ, "POC_COLOR": "1"})
+                           timeout=cfg["poc_timeout_sec"],
+                           env={**os.environ, "POC_COLOR": "1", **proxy_env(store.get(pid).get("proxy"))})
         out, rc = r.stdout + (("\n" + r.stderr) if r.stderr.strip() else ""), r.returncode
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")

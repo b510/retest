@@ -80,17 +80,22 @@ def _run(pid: str, resume: bool) -> None:
             store.log(pid, "📦 解壓上傳檔案")
             for sub in ("input", "input_text"):
                 shutil.rmtree(d / sub, ignore_errors=True)
-            files = ingest.safe_extract(d / "upload.zip", d / "input")
+            files = ingest.collect_inputs(d / "uploads", d / "input", legacy_zip=d / "upload.zip")
             inv = ingest.extract_texts(files, d / "input", d / "input_text")
             inv_path.write_text(json.dumps(inv, ensure_ascii=False, indent=2))
             store.log(pid, f"   報告 {len(inv['reports'])} 份、腳本 {len(inv['scripts'])} 支、其他 {len(inv['others'])} 個")
             if not inv["reports"]:
-                raise ValueError("zip 裡找不到任何報告（PDF / MD / HTML）")
+                raise ValueError("上傳的檔案中找不到任何報告（PDF / MD / HTML）")
             targets = ingest.derive_targets(d / "input", d / "input_text")
             if not targets:
                 raise ValueError("報告與腳本中找不到任何目標網址（http(s)://…），無法判定複測範圍")
             store.update(pid, targets=targets)
             store.log(pid, f"🎯 從報告自動辨識複測範圍：{'、'.join(targets)}")
+            sample = ingest.reports_reference_proxy(d / "input", d / "input_text")
+            if sample and store.get(pid).get("proxy") is None:
+                egress = store.load_config().get("egress_proxy") or ""
+                store.update(pid, proxy=egress)
+                store.log(pid, f"🛰️ 報告以 SOCKS 代理測試（樣例 {sample}）→ 複測一律經本機出口 {egress}，還原白名單出口 IP／內網可達性")
         inv = json.loads(inv_path.read_text())
         _check_stop(pid)
 

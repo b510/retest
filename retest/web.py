@@ -12,6 +12,8 @@ from pydantic import BaseModel
 from . import auth, pipeline, store
 
 STATIC = Path(__file__).resolve().parent / "static"
+_VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
+VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else ""
 app = FastAPI(title="Retest", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -95,12 +97,13 @@ def logout(request: Request):
 
 @app.get("/api/auth/status")
 def auth_status():
-    return {"auth": AUTH_ON}
+    return {"auth": AUTH_ON, "version": VERSION}
 
 
 class NewProject(BaseModel):
     name: str
     authorized: bool = False
+    allow_fin_write: bool = False
 
 
 def _meta(pid: str) -> dict:
@@ -145,7 +148,7 @@ def create_project(p: NewProject):
         raise HTTPException(400, "專案名稱必填")
     if not p.authorized:
         raise HTTPException(400, "請勾選授權聲明")
-    meta = store.create(p.name.strip(), [], "")
+    meta = store.create(p.name.strip(), [], "", allow_fin_write=p.allow_fin_write)
     return store.update(meta["id"], authorized_at=store.now())
 
 
@@ -154,26 +157,83 @@ def project(pid: str):
     return _meta(pid)
 
 
+@app.delete("/api/projects/{pid}")
+def delete_project(pid: str):
+    m = _meta(pid)
+    if m["running"]:
+        raise HTTPException(409, "執行中不可刪除，請先停止複測")
+    try:
+        store.delete(pid)
+    except FileNotFoundError:
+        raise HTTPException(404, "找不到專案")
+    return {"ok": True, "deleted": pid, "name": m.get("name")}
+
+
+UPLOAD_EXT = {".zip", ".pdf", ".md", ".html", ".htm", ".py", ".sh", ".txt"}
+
+
+def _safe_upname(name: str) -> str:
+    import re
+    return re.sub(r"[^\w.\-]+", "_", Path(name).name).strip("_.")[:120] or "file"
+
+
+def _uploads(pid: str) -> list[str]:
+    up = store.pdir(pid) / "uploads"
+    return sorted(p.name for p in up.glob("*") if p.is_file()) if up.exists() else []
+
+
+def _sync_uploads(pid: str) -> dict:
+    """把目前累積的上傳清單寫回 meta；沒有任何檔案時 stage 退回 created。"""
+    names = _uploads(pid)
+    legacy = (store.pdir(pid) / "upload.zip").exists()
+    summary = "、".join(names[:3]) + (f" 等 {len(names)} 份" if len(names) > 3 else "")
+    stage = "uploaded" if (names or legacy) else "created"
+    (store.pdir(pid) / "inventory.json").unlink(missing_ok=True)
+    return store.update(pid, stage=stage, uploads=names, upload_name=summary, error=None)
+
+
 @app.post("/api/projects/{pid}/upload")
-async def upload(pid: str, file: UploadFile = File(...)):
+async def upload(pid: str, files: list[UploadFile] = File(...)):
     m = _meta(pid)
     if m["running"]:
         raise HTTPException(409, "執行中不可上傳")
-    if not file.filename.lower().endswith(".zip"):
-        raise HTTPException(400, "只接受 .zip")
-    d = store.pdir(pid)
-    with open(d / "upload.zip", "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    (d / "inventory.json").unlink(missing_ok=True)
-    store.log(pid, f"⬆️ 上傳 {file.filename}")
-    return store.update(pid, stage="uploaded", upload_name=file.filename, error=None)
+    up = store.pdir(pid) / "uploads"
+    up.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for file in files:
+        ext = Path(file.filename or "").suffix.lower()
+        if ext not in UPLOAD_EXT:
+            raise HTTPException(400, f"不支援的檔案類型：{file.filename}（可上傳 zip / pdf / md / html / py / sh / txt）")
+        base = _safe_upname(file.filename)
+        dest, stem, suf = up / base, Path(base).stem, Path(base).suffix
+        i = 1
+        while dest.exists():  # 同名不覆蓋，累加
+            dest = up / f"{stem}_{i}{suf}"
+            i += 1
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        saved.append(dest.name)
+    store.log(pid, f"⬆️ 上傳 {'、'.join(saved)}（目前共 {len(_uploads(pid))} 份）")
+    return _sync_uploads(pid)
+
+
+@app.delete("/api/projects/{pid}/uploads/{name}")
+def delete_upload(pid: str, name: str):
+    m = _meta(pid)
+    if m["running"]:
+        raise HTTPException(409, "執行中不可移除上傳檔案")
+    p = store.pdir(pid) / "uploads" / Path(name).name
+    if p.exists() and p.is_file():
+        p.unlink()
+        store.log(pid, f"🗑️ 移除上傳檔案 {Path(name).name}")
+    return _sync_uploads(pid)
 
 
 @app.post("/api/projects/{pid}/run")
 def run(pid: str, resume: bool = False):
     m = _meta(pid)
-    if not (store.pdir(pid) / "upload.zip").exists():
-        raise HTTPException(400, "請先上傳 zip")
+    if not _uploads(pid) and not (store.pdir(pid) / "upload.zip").exists():
+        raise HTTPException(400, "請先上傳報告/腳本（zip 或散檔）")
     try:
         pipeline.start(pid, resume=resume)
     except RuntimeError as e:

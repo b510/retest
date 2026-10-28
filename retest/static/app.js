@@ -31,21 +31,33 @@ function render(m) {
     sec = document.getElementById("tplProject").content.firstElementChild.cloneNode(true);
     sec.dataset.id = m.id;
     main.appendChild(sec);
-    sec.querySelector(".file").onchange = e => upload(m.id, e.target.files[0]);
+    sec.querySelector(".file").onchange = e => { upload(m.id, e.target.files); e.target.value = ""; };
     sec.querySelector(".act-run").onclick = () => run(m.id, false);
     sec.querySelector(".act-resume").onclick = () => run(m.id, true);
     sec.querySelector(".act-stop").onclick = () => api(`/api/projects/${m.id}/stop`, { method: "POST" }).then(refresh);
+    sec.querySelector(".act-delete").onclick = () => remove(m.id, m.name);
   }
+  sec.querySelector(".act-delete").disabled = m.running;
   sec.querySelector(".pname").textContent = m.name;
   sec.querySelector(".pmeta").textContent = `範圍（自動辨識）：${m.targets.length ? m.targets.join("、") : "解析報告後產生"}　·　建立 ${m.created}`;
   sec.querySelector(".stage").textContent = m.stage_label + (m.running ? "…" : "");
   const idx = STAGES.findIndex(s => s[0] === m.stage);
   sec.querySelector(".stages").innerHTML = STAGES.map(([k, label], i) =>
     `<div class="${m.stage === "done" || i < idx ? "done" : i === idx ? "cur" : ""}">${label}</div>`).join("");
-  sec.querySelector(".upname").textContent = m.upload_name ? `已上傳：${m.upload_name}` : "尚未上傳";
+  const ups = m.uploads || [];
+  const hasUp = ups.length > 0 || !!m.upload_name;
+  sec.querySelector(".upname").textContent = ups.length ? `已上傳 ${ups.length} 份，可繼續新增或開始複測` : (m.upload_name ? `已上傳：${m.upload_name}` : "尚未上傳");
+  const ul = sec.querySelector(".uplist");
+  ul.innerHTML = ups.map(() => `<li><span></span><button class="x" title="移除此檔">✕</button></li>`).join("");
+  ul.querySelectorAll("li").forEach((li, i) => {
+    li.querySelector("span").textContent = ups[i];
+    const x = li.querySelector(".x");
+    x.disabled = m.running;
+    x.onclick = () => removeUpload(m.id, ups[i]);
+  });
   sec.querySelector(".file").disabled = m.running;
-  sec.querySelector(".act-run").disabled = m.running || !m.upload_name;
-  sec.querySelector(".act-resume").disabled = m.running || !m.upload_name;
+  sec.querySelector(".act-run").disabled = m.running || !hasUp;
+  sec.querySelector(".act-resume").disabled = m.running || !hasUp;
   sec.querySelector(".act-stop").disabled = !m.running;
   const alert = sec.querySelector(".alert");
   const msg = m.error ? `失敗：${m.error}` : m.blocked ? `AI 複測未正常完成：${m.blocked}（未完成項目已標示「需人工複測」，不會自動換模型重試）` : "";
@@ -91,12 +103,26 @@ async function open(id) {
   timer = setInterval(refresh, 2500);
 }
 
-async function upload(id, file) {
-  if (!file) return;
+async function upload(id, fileList) {
+  if (!fileList || !fileList.length) return;
   const fd = new FormData();
-  fd.append("file", file);
+  for (const f of fileList) fd.append("files", f);
   try { await api(`/api/projects/${id}/upload`, { method: "POST", body: fd }); } catch (e) { alert(e.message); }
   refresh();
+}
+
+async function removeUpload(id, name) {
+  try { await api(`/api/projects/${id}/uploads/${encodeURIComponent(name)}`, { method: "DELETE" }); } catch (e) { alert(e.message); }
+  refresh();
+}
+
+async function remove(id, name) {
+  if (!confirm(`確定永久刪除專案「${name}」？\n\n會一併刪除上傳的報告/POC、解壓檔、複測結果與交付包，無法復原。`)) return;
+  try {
+    await api(`/api/projects/${id}`, { method: "DELETE" });
+    if (current === id) { current = null; clearInterval(timer); document.getElementById("main").innerHTML = '<div class="empty">專案已刪除。</div>'; }
+    await loadList();
+  } catch (e) { alert(e.message); }
 }
 
 async function run(id, resume) {
@@ -113,11 +139,14 @@ document.getElementById("btnCreate").onclick = async e => {
   btn.disabled = true;
   try {
     const p = await api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: f.elements.name.value, authorized: f.elements.authorized.checked }) });
-    const fd = new FormData();
-    fd.append("file", f.elements.zip.files[0]);
-    await api(`/api/projects/${p.id}/upload`, { method: "POST", body: fd });
-    await api(`/api/projects/${p.id}/run`, { method: "POST" });
+      body: JSON.stringify({ name: f.elements.name.value, authorized: f.elements.authorized.checked,
+        allow_fin_write: f.elements.allow_fin_write.checked }) });
+    const files = f.elements.zip.files;
+    if (files && files.length) {
+      const fd = new FormData();
+      for (const file of files) fd.append("files", file);
+      await api(`/api/projects/${p.id}/upload`, { method: "POST", body: fd });
+    }
     document.getElementById("dlgNew").close(); f.reset();
     await loadList(); open(p.id);
   } catch (err) { alert(err.message); }
@@ -135,5 +164,12 @@ document.getElementById("btnSaveCfg").onclick = async e => {
   await api("/api/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   document.getElementById("dlgCfg").close();
 };
-api("/api/auth/status").then(s => document.getElementById("btnLogout").classList.toggle("hidden", !s.auth));
+api("/api/auth/status").then(s => {
+  document.getElementById("btnLogout").classList.toggle("hidden", !s.auth);
+  const v = s.version || "", el = document.getElementById("ver");
+  if (el && v) {
+    const isBeta = /beta|bate/i.test(v), num = v.replace(/[-_ ]?(beta|bate)\d*/i, "");
+    el.innerHTML = `v${num || v}` + (isBeta ? ` <b class="beta">BETA</b>` : "");
+  }
+});
 loadList();

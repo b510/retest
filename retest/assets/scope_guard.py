@@ -25,6 +25,11 @@ LOCAL_DESTRUCTIVE = [
     re.compile(r"\b(shutdown|reboot|poweroff)\b"),
 ]
 LOCAL_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost"}
+# 只有長得像真正可連線主機的字串才檢查：FQDN（含點、合法 TLD）、IPv4、localhost。
+# 其餘（grep/sed 的 [a-z] 正規片段、殘缺字串）一律當非主機略過。
+HOSTNAME_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$"
+    r"|^(?:\d{1,3}\.){3}\d{1,3}$|^localhost$", re.I)
 
 
 def parse_target(t: str):
@@ -72,30 +77,42 @@ def allowed(host: str, port, targets) -> bool:
     return False
 
 
-# Origin / Referer 標頭的值只是送給目標的字串（CORS、CSRF 測試），不會連線到該主機
-HEADER_VALUE_RES = [
-    re.compile(r"""(?:-H|--header)\s*(['"])\s*(?:Origin|Referer)\s*:[^'"]*\1""", re.I),
+# 以下片段是「送給目標的資料」，不是連線目標，掃描前先抹除，避免把 payload 裡的主機誤判成要連的對象：
+# - 任何 HTTP 標頭的值（-H "Name: value"）：CORS/CSRF/IP 偽造等測試常把其他主機寫進 Origin、Referer、X-Forwarded-For 等
+# - curl 的 -e/--referer
+# - 請求主體（-d/--data*）
+# - shell for 迴圈的清單（for v in "ip1" "ip2"; do）常是要輪送的偽造值
+DATA_RES = [
+    re.compile(r"""(?:-H|--header)\s*(['"]).*?:[^'"]*\1""", re.I),
+    re.compile(r"""(?:-H|--header)\s*=?\s*[^\s'"]+:[^\s'"]+"""),
     re.compile(r"""(?:-e|--referer)\s+(['"]?)\S+?\1(?=\s|$)"""),
-    re.compile(r"""(['"])(?:Origin|Referer)\1\s*:\s*(['"])[^'"]*\2""", re.I),
+    re.compile(r"""(?:-x|--proxy|--socks5(?:-hostname)?|--socks4a?|--preproxy)\s+\S+"""),  # 代理為授權測試基礎設施，非目標
+    re.compile(r"""(?:--data(?:-raw|-binary|-urlencode)?|-d)\s*(['"])(?:\\.|(?!\1).)*\1""", re.I | re.S),
+    re.compile(r"""\bfor\s+\w+\s+in\s+[^;\n]*;?\s*do\b"""),
 ]
 
 
 def hosts_in(text: str, bare_hosts: bool = True):
-    for rx in HEADER_VALUE_RES:
+    for rx in DATA_RES:
         text = rx.sub(" ", text)
     found = []
     for m in URL_RE.finditer(text):
         hp = m.group(1)
         if "$" in hp or "{" in hp:
             continue  # 變數，交給檔案內容掃描
+        if m.start() and text[m.start() - 1] in "=&":
+            continue  # 查詢參數值（?url=http://… 的 SSRF payload），是資料不是連線目標
         host, port = split_hostport(hp)
-        if not host or re.search(r"[\^*+()|\[\]]", host):
-            continue  # grep/sed 正規表示式片段（例如 https://[^ ]+），不是可連線的主機
+        if not host or not HOSTNAME_RE.match(host):
+            continue  # 不是真正的主機（grep/sed 正規片段 https://[a-z]+、殘缺字串等）
         found.append((host, port))
-    # 裸 IP / localhost 只看指令本身；檔案內容裡的裸 IP 多半是說明文字（例如出口 IP），不是連線目標
+    # 帶協定的完整網址（上面）是可靠的連線訊號；裸 IP 太容易是資料（標頭值、偽造 IP、說明文字、SSRF payload）。
+    # 只有本機回環位址的裸寫法才攔——這是唯一可能誤打到這台機器其他服務的情況；其餘裸 IP 一律放行，靠完整網址把關。
     if bare_hosts:
         for m in HOSTPORT_RE.finditer(URL_RE.sub(" ", text)):
-            found.append((m.group(1).lower(), m.group(2)))
+            host = m.group(1).lower()
+            if host in LOCAL_NAMES or host == "localhost" or host.startswith("127.") or host == "0.0.0.0":
+                found.append((host, m.group(2)))
     return found
 
 
