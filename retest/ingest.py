@@ -1,6 +1,7 @@
 """安全解壓 zip，並把 PDF / HTML 報告轉成純文字方便模型閱讀。"""
 import html
 import re
+import shutil
 import stat
 import subprocess
 import zipfile
@@ -20,6 +21,30 @@ REFERENCE_HOSTS = ("owasp.org", "mitre.org", "nist.gov", "cve.org", "first.org",
 # 報告用來示意的佔位主機，送請求沒有意義
 PLACEHOLDER_RE = re.compile(r"(^|\.)(example\.(com|org|net)|[a-z0-9-]+\.(example|invalid|test))$|^(attacker|evil)\.", re.I)
 DEFAULT_PORT = {"http": "80", "ws": "80", "https": "443", "wss": "443"}
+# 報告常以裸主機名（無 http:// 前綴）寫出雲端儲存/主機資產，TARGET_URL_RE 抓不到，另行辨識
+CLOUD_HOST_RE = re.compile(
+    r"\b([a-z0-9][a-z0-9.-]*\.(?:"
+    r"s3[.-][a-z0-9-]*\.amazonaws\.com|s3\.amazonaws\.com|[a-z0-9-]*\.compute\.amazonaws\.com"
+    r"|[a-z0-9-]+\.amazonaws\.com|[a-z0-9-]+\.blob\.core\.windows\.net|[a-z0-9-]+\.web\.core\.windows\.net"
+    r"|oss-[a-z0-9-]+\.aliyuncs\.com|[a-z0-9-]+\.cos\.[a-z0-9-]+\.myqcloud\.com"
+    r"|storage\.googleapis\.com|[a-z0-9-]+\.r2\.cloudflarestorage\.com))\b", re.I)
+S3_URI_RE = re.compile(r"\bs3://([a-z0-9][a-z0-9.-]+)", re.I)
+# 原始授權測試若經代理（報告「代理通道」欄），複測沿用同一條以還原白名單出口 IP 與內網可達性
+PROXY_RE = re.compile(r"\bsocks5h?://(?:(?:\d{1,3}\.){3}\d{1,3}|localhost):\d{1,5}", re.I)
+
+
+def reports_reference_proxy(input_dir: Path, text_dir: Path) -> str | None:
+    """報告/腳本是否以 SOCKS 代理進行測試（回傳第一個樣例字串，僅供記錄）。
+
+    各報告可能寫不同的 socks5；但從本機 Kali 出去一律走設定檔的 egress_proxy（127.0.0.1:9050），
+    不照抄報告裡的位址。只要有任一份用到代理，複測就沿用本機出口以還原白名單出口 IP／內網可達性。
+    """
+    files = list(text_dir.glob("*.txt")) + [p for p in input_dir.rglob("*") if p.suffix.lower() in SCRIPT_EXT]
+    for f in files:
+        m = PROXY_RE.search(f.read_text(errors="replace"))
+        if m:
+            return m.group(0).lower()
+    return None
 
 
 def safe_extract(zip_path: Path, dest: Path) -> list[Path]:
@@ -56,6 +81,45 @@ def safe_extract(zip_path: Path, dest: Path) -> list[Path]:
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info) as src, open(target, "wb") as dst:
                 dst.write(src.read())
+            out.append(target)
+    return out
+
+
+def _safe_name(name: str) -> str:
+    return re.sub(r"[^\w.\-]+", "_", Path(name).name).strip("_.") or "file"
+
+
+def collect_inputs(uploads_dir: Path, dest: Path, legacy_zip: Path | None = None) -> list[Path]:
+    """彙整一個專案累積上傳的所有來源（多個 zip＋散檔）到 input/。
+
+    - 每個 .zip 解壓進 input/<zip去副檔名>/，避免不同 zip 內同名檔互相覆蓋。
+    - 散檔（PDF/MD/HTML/PY/SH/TXT）複製進 input/_files/。
+    - legacy_zip：相容舊專案單一 upload.zip。
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    out: list[Path] = []
+    srcs: list[Path] = []
+    if legacy_zip and legacy_zip.exists():
+        srcs.append(legacy_zip)
+    if uploads_dir.exists():
+        srcs += sorted(p for p in uploads_dir.iterdir() if p.is_file())
+    for s in srcs:
+        if s.suffix.lower() == ".zip":
+            sub = dest / _safe_name(s.stem)
+            i = 1
+            while sub.exists():
+                sub = dest / f"{_safe_name(s.stem)}_{i}"
+                i += 1
+            out += safe_extract(s, sub)
+        else:
+            fdir = dest / "_files"
+            fdir.mkdir(parents=True, exist_ok=True)
+            target = fdir / _safe_name(s.name)
+            i = 1
+            while target.exists():
+                target = fdir / f"{target.stem}_{i}{target.suffix}"
+                i += 1
+            shutil.copy2(s, target)
             out.append(target)
     return out
 
@@ -103,7 +167,8 @@ def derive_targets(input_dir: Path, text_dir: Path) -> list[str]:
     found, local = set(), set()
     files = list(text_dir.glob("*.txt")) + [p for p in input_dir.rglob("*") if p.suffix.lower() in SCRIPT_EXT]
     for f in files:
-        for m in TARGET_URL_RE.finditer(f.read_text(errors="replace")):
+        text = f.read_text(errors="replace")
+        for m in TARGET_URL_RE.finditer(text):
             scheme, host, port = m.group(1).lower(), m.group(2).lower().strip(".-"), m.group(3)
             if not host or "." not in host and host != "localhost" and not host.startswith("["):
                 continue
@@ -113,6 +178,11 @@ def derive_targets(input_dir: Path, text_dir: Path) -> list[str]:
                 local.add(f"{host}:{port or DEFAULT_PORT[scheme]}")
                 continue
             found.add(f"{host}:{port}" if port else host)
+        # 裸主機名寫出的雲端儲存/主機資產（報告既列為資產即視為授權範圍）
+        for m in CLOUD_HOST_RE.finditer(text):
+            found.add(m.group(1).lower().strip(".-"))
+        for m in S3_URI_RE.finditer(text):
+            found.add(f"{m.group(1).lower().strip('.-')}.s3.amazonaws.com")
     return sorted(found) or sorted(local)
 
 

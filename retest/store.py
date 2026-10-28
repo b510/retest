@@ -44,12 +44,13 @@ def now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def create(name: str, targets: list[str], notes: str) -> dict:
+def create(name: str, targets: list[str], notes: str, allow_fin_write: bool = False) -> dict:
     pid = secrets.token_hex(6)
     d = pdir(pid)
     d.mkdir(parents=True)
     meta = {
         "id": pid, "name": name, "targets": targets, "notes": notes,
+        "allow_fin_write": allow_fin_write,
         "stage": "created", "created": now(), "updated": now(),
         "upload_name": None, "error": None, "blocked": None, "summary": None,
     }
@@ -59,6 +60,15 @@ def create(name: str, targets: list[str], notes: str) -> dict:
 
 def get(pid: str) -> dict:
     return json.loads((pdir(pid) / "meta.json").read_text())
+
+
+def delete(pid: str) -> None:
+    """永久刪除整個專案資料夾（含上傳的 zip、解壓檔、work、output 與交付包）。"""
+    import shutil
+    d = pdir(pid)  # pdir 已驗證 pid 為純英數，避免路徑穿越
+    if not (d / "meta.json").exists():
+        raise FileNotFoundError(pid)
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def update(pid: str, **kw) -> dict:

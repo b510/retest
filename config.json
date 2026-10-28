@@ -8,8 +8,9 @@
   "host": "127.0.0.1",
   "port": 8780,
   "auth": "auto",
-  "token_ttl_sec": 30,
+  "token_ttl_sec": 180,
   "session_hours": 10,
   "ssl_cert": "",
-  "ssl_key": ""
+  "ssl_key": "",
+  "egress_proxy": "socks5h://127.0.0.1:9050"
 }
