@@ -2,10 +2,22 @@
 import base64
 import json
 import html
+import re
 import zipfile
 from pathlib import Path
 
 from . import store
+
+ASSETS = Path(__file__).parent / "assets"
+# POC/cleanup 腳本原本 source "../lib/poc_lib.sh"；交付包不含 lib/，
+# 故打包時把函式庫整段內嵌進每個腳本，讓對方 unzip 後可直接單獨執行。
+_LIB_SRC_RE = re.compile(r'^[ \t]*(?:source|\.)[ \t]+.*poc_lib\.sh.*$', re.M)
+
+
+def _inline_lib(text: str, lib_body: str) -> str:
+    """把腳本裡 source poc_lib.sh 那行，換成函式庫本體（去掉 shebang）。"""
+    repl = "# ── 以下為內嵌的 poc_lib.sh（交付包不另附 lib/）──\n" + lib_body
+    return _LIB_SRC_RE.sub(lambda _m: repl, text, count=1)
 
 SEV_ORDER = {"嚴重": 0, "高": 1, "中": 2}
 SEV_ALIAS = {"critical": "嚴重", "high": "高", "medium": "中", "moderate": "中",
@@ -24,7 +36,7 @@ def _img(p: Path | None) -> str:
     b64 = base64.b64encode(p.read_bytes()).decode()
     # 點圖開大圖直接用內嵌 data URI（self-contained，不依賴 screenshots/ 檔案、不重複體積）
     return (f'<img src="data:image/png;base64,{b64}" alt="POC 截圖 {E(p.name)}" '
-            f'style="cursor:zoom-in" onclick="window.open(this.src)">')
+            f'style="cursor:zoom-in" onclick="zoomImg(this)">')
 
 
 CSS = """
@@ -56,6 +68,19 @@ JS = """
 const q=document.getElementById('q');q.addEventListener('input',()=>{const v=q.value.trim().toLowerCase();
 document.querySelectorAll('nav .vlink').forEach(a=>a.classList.toggle('hidden',v&&!a.dataset.k.includes(v)));
 document.querySelectorAll('tr.vrow').forEach(r=>r.classList.toggle('hidden',v&&!r.dataset.k.includes(v)));});
+// 點截圖開新分頁看大圖：data: URI 無法直接 window.open（瀏覽器擋頂層導向 → about:blank），
+// 改成把 data URI 轉成 Blob，開 blob: URL（允許），新分頁就是純圖片、可縮放。
+function zoomImg(img){
+  try{
+    const parts=img.src.split(',');const mime=(parts[0].match(/:(.*?);/)||[])[1]||'image/png';
+    const bin=atob(parts[1]);const arr=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
+    const url=URL.createObjectURL(new Blob([arr],{type:mime}));
+    const w=window.open(url,'_blank');
+    if(!w){location.href=url;return;}            // 彈窗被擋 → 直接在本頁開
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+  }catch(e){window.open(img.src,'_blank');}
+}
 """
 
 
@@ -177,12 +202,17 @@ def package(pid: str, findings: list[dict]) -> Path:
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in meta["name"])[:40] or pid
     zp = out / f"retest_{safe}_{pid}.zip"
     # 交付包只收 report.html（自包含、已內嵌截圖）＋ POC 腳本＋清理腳本。
-    # 不收 lib/（poc_lib.sh）、screenshots/（已內嵌於報告）、created.json。
+    # 不另附 lib/（poc_lib.sh 內嵌進各腳本）、screenshots/（已內嵌於報告）、created.json。
+    lib_path = work / "lib" / "poc_lib.sh"
+    lib_text = (lib_path if lib_path.exists() else ASSETS / "poc_lib.sh").read_text(encoding="utf-8")
+    lib_body = re.sub(r'^#![^\n]*\n', '', lib_text, count=1)  # 去掉 shebang，避免檔中二次出現
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(out / "report.html", "report.html")
         for p in sorted((work / "pocs").glob("*")):
             if p.is_file():
-                z.write(p, f"pocs/{p.name}")
+                txt = p.read_text(encoding="utf-8", errors="replace")
+                z.writestr(f"pocs/{p.name}", _inline_lib(txt, lib_body))
         if (work / "cleanup.sh").exists():
-            z.write(work / "cleanup.sh", "cleanup.sh")
+            txt = (work / "cleanup.sh").read_text(encoding="utf-8", errors="replace")
+            z.writestr("cleanup.sh", _inline_lib(txt, lib_body))
     return zp
