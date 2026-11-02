@@ -68,6 +68,67 @@ def _run_cleanup(pid: str, work, out) -> dict:
     return result
 
 
+def _finalize(pid: str, work, data: dict) -> None:
+    """findings.json 完成後的產出階段：重跑 POC → 截圖 → 清理 → 報告 → 打包。
+    與付費的 agent 階段分離，崩潰後可只重建報告，不必重跑模型。"""
+    d = store.pdir(pid)
+    findings, excluded = [], list(data.get("excluded", []))
+    for f in data.get("findings", []):
+        sev = report.norm_sev(f.get("severity", ""))
+        if sev is None:  # 低/資訊一律不進報告
+            excluded.append({"original_ref": f.get("original_ref", ""), "title": f.get("title", ""),
+                             "severity": f.get("severity", ""), "reason": "非中風險以上，不列入"})
+            continue
+        f["severity"] = sev
+        findings.append(f)
+
+    store.update(pid, stage="poc_run")
+    out = d / "output"
+    shutil.rmtree(out, ignore_errors=True)
+    (out / "screenshots").mkdir(parents=True)
+    for f in findings:
+        _check_stop(pid)
+        if not f.get("poc"):
+            f["final_status"] = "需人工複測"
+            store.log(pid, f"⏭️ {f['id']} 無 POC，標示需人工複測")
+            continue
+        store.log(pid, f"▶️ 框架重跑 {f['id']}：bash {f['poc']}")
+        r = evidence.run_poc(pid, work, f["poc"])
+        status = r["status"]
+        if status == "無法判定" and f.get("agent_status") == "需人工複測":
+            status = "需人工複測"  # POC 刻意停在前置檢查（白名單、寫入、範圍外），沿用 AI 的分類
+        f.update(final_status=status, poc_rc=r["rc"], poc_secs=r["secs"])
+        (out / f"{f['id']}.log").write_text(r["output"])
+        store.log(pid, f"   → {r['status']}（rc={r['rc']}，{r['secs']}s）")
+
+    store.update(pid, stage="screenshot")
+    for f in findings:
+        _check_stop(pid)
+        log = out / f"{f['id']}.log"
+        if not log.exists():
+            continue
+        name = f"{f['id']}.png"
+        title = f"$ bash {f['poc']}   —   {f['id']} {f.get('title', '')}"
+        if evidence.screenshot(title, log.read_text(), out / "screenshots" / name):
+            f["screenshot"] = name
+            store.log(pid, f"📸 {name}")
+        else:
+            store.log(pid, f"⚠️ {f['id']} 截圖失敗")
+
+    store.update(pid, stage="cleanup")
+    cleanup = _run_cleanup(pid, work, out)
+    (d / "cleanup_result.json").write_text(json.dumps(cleanup, ensure_ascii=False, indent=2))
+
+    store.update(pid, stage="report")
+    report.build(pid, findings, data.get("platform") or {}, cleanup)
+    zp = report.package(pid, findings)
+    (d / "final_findings.json").write_text(json.dumps(findings, ensure_ascii=False, indent=2))
+    summary = {s: sum(1 for f in findings if f["final_status"] == s) for s in report.STATUS_CLASS}
+    summary["total"] = len(findings)
+    store.update(pid, stage="done", summary=summary, zip_name=zp.name)
+    store.log(pid, f"✅ 完成：{summary}，交付包 {zp.name}")
+
+
 def _run(pid: str, resume: bool) -> None:
     d = store.pdir(pid)
     try:
@@ -112,62 +173,7 @@ def _run(pid: str, resume: bool) -> None:
         if not fpath.exists():
             raise RuntimeError("AI 沒有產出 findings.json，無法產生報告" + (f"（{res['blocked']}）" if res["blocked"] else ""))
         data = json.loads(fpath.read_text())
-
-        findings, excluded = [], list(data.get("excluded", []))
-        for f in data.get("findings", []):
-            sev = report.norm_sev(f.get("severity", ""))
-            if sev is None:  # 低/資訊一律不進報告
-                excluded.append({"original_ref": f.get("original_ref", ""), "title": f.get("title", ""),
-                                 "severity": f.get("severity", ""), "reason": "非中風險以上，不列入"})
-                continue
-            f["severity"] = sev
-            findings.append(f)
-
-        store.update(pid, stage="poc_run")
-        out = d / "output"
-        shutil.rmtree(out, ignore_errors=True)
-        (out / "screenshots").mkdir(parents=True)
-        for f in findings:
-            _check_stop(pid)
-            if not f.get("poc"):
-                f["final_status"] = "需人工複測"
-                store.log(pid, f"⏭️ {f['id']} 無 POC，標示需人工複測")
-                continue
-            store.log(pid, f"▶️ 框架重跑 {f['id']}：bash {f['poc']}")
-            r = evidence.run_poc(pid, work, f["poc"])
-            status = r["status"]
-            if status == "無法判定" and f.get("agent_status") == "需人工複測":
-                status = "需人工複測"  # POC 刻意停在前置檢查（白名單、寫入、範圍外），沿用 AI 的分類
-            f.update(final_status=status, poc_rc=r["rc"], poc_secs=r["secs"])
-            (out / f"{f['id']}.log").write_text(r["output"])
-            store.log(pid, f"   → {r['status']}（rc={r['rc']}，{r['secs']}s）")
-
-        store.update(pid, stage="screenshot")
-        for f in findings:
-            _check_stop(pid)
-            log = out / f"{f['id']}.log"
-            if not log.exists():
-                continue
-            name = f"{f['id']}.png"
-            title = f"$ bash {f['poc']}   —   {f['id']} {f.get('title', '')}"
-            if evidence.screenshot(title, log.read_text(), out / "screenshots" / name):
-                f["screenshot"] = name
-                store.log(pid, f"📸 {name}")
-            else:
-                store.log(pid, f"⚠️ {f['id']} 截圖失敗")
-
-        store.update(pid, stage="cleanup")
-        cleanup = _run_cleanup(pid, work, out)
-        (d / "cleanup_result.json").write_text(json.dumps(cleanup, ensure_ascii=False, indent=2))
-
-        store.update(pid, stage="report")
-        report.build(pid, findings, data.get("platform") or {}, cleanup)
-        zp = report.package(pid, findings)
-        (d / "final_findings.json").write_text(json.dumps(findings, ensure_ascii=False, indent=2))
-        summary = {s: sum(1 for f in findings if f["final_status"] == s) for s in report.STATUS_CLASS}
-        summary["total"] = len(findings)
-        store.update(pid, stage="done", summary=summary, zip_name=zp.name)
-        store.log(pid, f"✅ 完成：{summary}，交付包 {zp.name}")
+        _finalize(pid, work, data)
     except InterruptedError:
         store.update(pid, stage="stopped")
         store.log(pid, "⏹️ 已由使用者停止")

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Retest 中控台</title>
+<link rel="stylesheet" href="/static/style.css?v=6">
+<style>
+.ctable{width:100%;border-collapse:collapse;margin-top:14px;font-size:14px}
+.ctable th,.ctable td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+.ctable th{color:var(--muted);font-weight:600;font-size:13px}
+.ctable tr:hover td{background:var(--bg)}
+.ctable td.wrap{white-space:normal;overflow-wrap:anywhere}
+.live{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.live.on{background:var(--ok)}.live.idle{background:var(--muted)}
+.badge{font-size:11px;border-radius:4px;padding:1px 6px;margin-left:6px}
+.badge.admin{background:var(--accent);color:#fff}.badge.me{border:1px solid var(--line);color:var(--muted)}
+.subtle{color:var(--muted);font-size:13px}
+.toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-top:6px}
+.empty-row td{text-align:center;color:var(--muted);padding:28px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Retest <span>中控台 · 線上 Session</span></h1>
+  <div><a class="btn ghost" href="/">← 回框架</a> <a class="btn ghost" href="/api/auth/logout">登出</a></div>
+</header>
+<div class="layout"><main style="flex:1;padding:20px 28px;min-width:0">
+  <div class="toolbar">
+    <div class="subtle" id="meta">載入中…</div>
+    <div class="subtle">每 3 秒自動更新 · 綠點＝近 90 秒內有活動</div>
+  </div>
+  <table class="ctable">
+    <thead><tr><th>狀態</th><th>名稱</th><th>來源 IP</th><th>登入時間</th><th>session 到期</th><th>最後活動</th><th>目前所在</th><th></th></tr></thead>
+    <tbody id="rows"><tr class="empty-row"><td colspan="8">載入中…</td></tr></tbody>
+  </table>
+</main></div>
+
+<script>
+const pad = n => String(n).padStart(2, "0");
+const clock = t => { const d = new Date(t * 1000); return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function rel(sec) {
+  if (sec == null) return "—";
+  if (sec < 90) return "使用中";
+  if (sec < 3600) return `${Math.floor(sec/60)} 分前`;
+  if (sec < 86400) return `${Math.floor(sec/3600)} 小時前`;
+  return `${Math.floor(sec/86400)} 天前`;
+}
+function left(exp, now) {
+  const s = exp - now; if (s <= 0) return "已過期";
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  return h ? `${clock(exp)}（剩 ${h}h${pad(m)}m）` : `${clock(exp)}（剩 ${m}m）`;
+}
+
+async function revoke(sid, label) {
+  if (!confirm(`確定當下撤銷「${label}」的存取權？\n\n對方下一個動作就會被踢回登入頁，需要你重新簽發 token 才能再進來。`)) return;
+  const r = await fetch(`/api/admin/sessions/${sid}`, { method: "DELETE" });
+  if (!r.ok) { alert((await r.json().catch(()=>({}))).detail || "撤銷失敗"); return; }
+  load();
+}
+
+async function load() {
+  let data;
+  try { const r = await fetch("/api/admin/sessions"); if (r.status === 401 || r.status === 403) { location.href = "/"; return; } data = await r.json(); }
+  catch { document.getElementById("meta").textContent = "連線中斷，重試中…"; return; }
+  const now = data.now, rows = data.sessions || [];
+  const online = rows.filter(s => s.last_seen != null && now - s.last_seen < 90).length;
+  document.getElementById("meta").textContent = `共 ${rows.length} 個有效 session，${online} 個使用中`;
+  const tb = document.getElementById("rows");
+  if (!rows.length) { tb.innerHTML = '<tr class="empty-row"><td colspan="8">目前沒有任何人連進來。</td></tr>'; return; }
+  tb.innerHTML = "";
+  for (const s of rows) {
+    const on = s.last_seen != null && now - s.last_seen < 90;
+    const isMe = !!s.me;
+    const tr = document.createElement("tr");
+    const cells = [
+      `<span class="live ${on?'on':'idle'}"></span>${on?'使用中':'閒置'}`,
+      `<b></b>${s.admin?'<span class="badge admin">管理員</span>':''}${isMe?'<span class="badge me">本機</span>':''}`,
+      s.ip || "—",
+      s.login ? clock(s.login) : "—",
+      left(s.expires, now),
+      rel(s.last_seen != null ? now - s.last_seen : null),
+      s.project || "—",
+      isMe ? '<span class="subtle">—</span>' : `<button class="danger" style="padding:4px 12px">撤銷</button>`,
+    ];
+    tr.innerHTML = cells.map((c,i)=>`<td class="${i===6?'wrap':''}">${c}</td>`).join("");
+    tr.querySelector("b").textContent = s.label;  // 名稱用 textContent 防 XSS
+    const td6 = tr.children[6]; td6.textContent = s.project || "—";
+    if (!isMe) tr.querySelector("button").onclick = () => revoke(s.sid, s.label);
+    tb.appendChild(tr);
+  }
+}
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 """Web 前台與 API。"""
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -13,22 +14,49 @@ from . import auth, pipeline, store
 
 STATIC = Path(__file__).resolve().parent / "static"
 _VERSION_FILE = Path(__file__).resolve().parent.parent / "VERSION"
-VERSION = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else ""
+
+
+def _version() -> str:
+    """即時從 VERSION 檔讀取，改版號重整頁面即反映，不需重啟。"""
+    try:
+        return _VERSION_FILE.read_text().strip()
+    except OSError:
+        return ""
 app = FastAPI(title="Retest", docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 # __main__ 啟動前把實際 bind host 寫進 RETEST_BIND；綁公網時強制登入
 AUTH_ON = auth.enabled(os.environ.get("RETEST_BIND", "127.0.0.1"))
+# 內網網段白名單（CIDR 清單，啟動時讀一次）；空清單 = 不設限。loopback 永遠放行。
+LAN_ALLOW = store.load_config().get("lan_allow") or []
 PUBLIC_PATHS = {"/login", "/api/auth/login", "/static/style.css"}
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
-    if AUTH_ON and path not in PUBLIC_PATHS and not auth.check_session(request.cookies.get(auth.COOKIE)):
+    ip = _client_ip(request)
+    peer = request.client.host if request.client else ""
+    # 1) 網段層：只對「直連」來源套白名單（用 TCP peer，直連者無法用轉發標頭偽裝）。
+    #    經本機 cloudflared 隧道（在家用一次性連結）轉發的請求 peer 為 loopback → 跳過網段，
+    #    改由登入層的一次性 token + session 把關。LAN 直連與隧道兩條路並存。
+    if LAN_ALLOW and peer not in ("127.0.0.1", "::1") and not auth.ip_allowed(peer, LAN_ALLOW):
         if path.startswith("/api/"):
-            return JSONResponse({"detail": "未登入或 session 已過期"}, status_code=401)
-        return RedirectResponse("/login", status_code=302)
+            return JSONResponse({"detail": "你的來源 IP 不在允許的網段內"}, status_code=403)
+        return PlainTextResponse("Forbidden：來源不在允許的網段內", status_code=403)
+    # 2) 登入層：驗證 session 並記錄活動；中控台/admin API 另需管理員。
+    #    真本機（loopback peer 且無轉發標頭）＝伺服器自身 → 免 token、免 session，直接放行並視為管理員。
+    #    隧道流量雖也是 loopback peer，但帶 cf-connecting-ip 標頭，判為公網，仍須 token。
+    if AUTH_ON and path not in PUBLIC_PATHS and _tier(request) != "local":
+        entry = auth.touch(request.cookies.get(auth.COOKIE), ip, path)
+        if not entry:
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "未登入或 session 已過期"}, status_code=401)
+            return RedirectResponse("/login", status_code=302)
+        if (path == "/console" or path.startswith("/api/admin")) and not entry.get("admin"):
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "需要管理員權限"}, status_code=403)
+            return RedirectResponse("/", status_code=302)
     resp = await call_next(request)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
@@ -45,11 +73,39 @@ def _client_ip(request: Request) -> str:
     return peer or "unknown"
 
 
+def _tier(request: Request) -> str:
+    """依連線來源分層：local（伺服器本機）/ lan（網段直連）/ public（隧道或其他）。
+    - loopback peer 且無轉發標頭 → local（owner 自己的機器）
+    - loopback peer 且帶 cf-connecting-ip / x-forwarded-for → public（經 cloudflared 隧道）
+    - peer 落在 LAN 白名單 → lan
+    - 其餘 → public
+    """
+    peer = request.client.host if request.client else ""
+    if peer in ("127.0.0.1", "::1"):
+        fwd = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "")
+        return "public" if fwd else "local"
+    if LAN_ALLOW and auth.ip_allowed(peer, LAN_ALLOW):
+        return "lan"
+    return "public"
+
+
+def _session_ttl(request: Request) -> float:
+    """登入時依來源決定 session 壽命：網段 7 天、公網 10 小時、本機實質無限。"""
+    tier = _tier(request)
+    s = auth.settings()
+    if tier == "lan":
+        return s["lan_session_sec"]
+    if tier == "local":
+        return auth.NO_EXPIRY
+    return s["session_hours"] * 3600
+
+
 def _login(request: Request, token: str, resp):
     ip = _client_ip(request)
     if not auth.throttle_ok(ip):
         raise HTTPException(429, "嘗試次數過多，請 5 分鐘後再試")
-    got = auth.consume_token(token.strip())
+    got = auth.consume_token(token.strip(), ip=ip, ua=request.headers.get("user-agent", ""),
+                             session_ttl=_session_ttl(request))
     auth.record_attempt(ip, bool(got))
     if not got:
         return None
@@ -96,8 +152,40 @@ def logout(request: Request):
 
 
 @app.get("/api/auth/status")
-def auth_status():
-    return {"auth": AUTH_ON, "version": VERSION}
+def auth_status(request: Request):
+    local = AUTH_ON and _tier(request) == "local"  # 本機免登入即視為管理員
+    entry = auth.session_info(request.cookies.get(auth.COOKIE)) if AUTH_ON else None
+    return {"auth": AUTH_ON, "version": _version(),
+            "admin": local or bool(entry and entry.get("admin"))}
+
+
+@app.get("/console", response_class=HTMLResponse)
+def console_page():
+    return (STATIC / "console.html").read_text()
+
+
+@app.get("/api/admin/sessions")
+def admin_sessions(request: Request):
+    me = auth.session_info(request.cookies.get(auth.COOKIE)) or {}
+    my_sid = me.get("sid")
+    rows = auth.list_sessions()
+    for r in rows:
+        r["me"] = bool(my_sid and r.get("sid") == my_sid)  # 自己這個 session，前端不給撤銷
+        m = re.search(r"/projects/([0-9a-fA-F]{12})", r.get("path") or "")  # 推回目前所在專案名稱
+        if m:
+            try:
+                r["project"] = store.get(m.group(1)).get("name")
+            except Exception:
+                r["project"] = None
+    return {"sessions": rows, "now": time.time()}
+
+
+@app.delete("/api/admin/sessions/{sid}")
+def admin_revoke(sid: str):
+    entry = auth.revoke_by_sid(sid)
+    if not entry:
+        raise HTTPException(404, "找不到該 session（可能已過期或已被撤銷）")
+    return {"ok": True, "revoked": sid, "label": entry.get("label")}
 
 
 class NewProject(BaseModel):

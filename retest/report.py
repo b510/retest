@@ -22,7 +22,9 @@ def _img(p: Path | None) -> str:
     if not p or not p.exists():
         return '<p class="muted">（無截圖）</p>'
     b64 = base64.b64encode(p.read_bytes()).decode()
-    return f'<a href="screenshots/{E(p.name)}" target="_blank"><img src="data:image/png;base64,{b64}" alt="POC 截圖 {E(p.name)}"></a>'
+    # 點圖開大圖直接用內嵌 data URI（self-contained，不依賴 screenshots/ 檔案、不重複體積）
+    return (f'<img src="data:image/png;base64,{b64}" alt="POC 截圖 {E(p.name)}" '
+            f'style="cursor:zoom-in" onclick="window.open(this.src)">')
 
 
 CSS = """
@@ -174,16 +176,13 @@ def package(pid: str, findings: list[dict]) -> Path:
     work, out = d / "work", d / "output"
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in meta["name"])[:40] or pid
     zp = out / f"retest_{safe}_{pid}.zip"
+    # 交付包只收 report.html（自包含、已內嵌截圖）＋ POC 腳本＋清理腳本。
+    # 不收 lib/（poc_lib.sh）、screenshots/（已內嵌於報告）、created.json。
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(out / "report.html", "report.html")
-        z.write(work / "lib" / "poc_lib.sh", "lib/poc_lib.sh")
         for p in sorted((work / "pocs").glob("*")):
             if p.is_file():
                 z.write(p, f"pocs/{p.name}")
-        for p in sorted((out / "screenshots").glob("*.png")):
-            z.write(p, f"screenshots/{p.name}")
         if (work / "cleanup.sh").exists():
             z.write(work / "cleanup.sh", "cleanup.sh")
-        if (work / "created.json").exists():
-            z.write(work / "created.json", "created.json")
     return zp

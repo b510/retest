@@ -166,6 +166,7 @@ document.getElementById("btnSaveCfg").onclick = async e => {
 };
 api("/api/auth/status").then(s => {
   document.getElementById("btnLogout").classList.toggle("hidden", !s.auth);
+  document.getElementById("btnConsole").classList.toggle("hidden", !s.admin);
   const v = s.version || "", el = document.getElementById("ver");
   if (el && v) {
     const isBeta = /beta|bate/i.test(v), num = v.replace(/[-_ ]?(beta|bate)\d*/i, "");

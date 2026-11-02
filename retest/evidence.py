@@ -40,6 +40,7 @@ def run_poc(pid: str, work: Path, poc_rel: str) -> dict:
     t0 = time.time()
     try:
         r = subprocess.run(["bash", str(script)], cwd=script.parent, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",  # POC 可能吐二進位位元組，寬鬆解碼避免整條 pipeline 崩潰
                            timeout=cfg["poc_timeout_sec"],
                            env={**os.environ, "POC_COLOR": "1", **proxy_env(store.get(pid).get("proxy"))})
         out, rc = r.stdout + (("\n" + r.stderr) if r.stderr.strip() else ""), r.returncode
@@ -113,7 +114,8 @@ pre {{ color:#c9d1d9; font-size:14px; line-height:1.5; white-space:pre-wrap; wor
 
 
 def _crop_tail(p: Path) -> None:
-    """裁掉高度估多時留下的底部空白。"""
+    """裁掉高度估多時留下的底部空白，並以 64 色調色盤（PNG8、不抖色）存檔。
+    終端截圖顏色少，量化後體積約省 70%、文字仍銳利，內嵌後報告大幅縮小。"""
     im = Image.open(p).convert("RGB")
     w, h = im.size
     bg = im.getpixel((2, h - 2))
@@ -122,4 +124,5 @@ def _crop_tail(p: Path) -> None:
     while y > 60 and all(px[x, y] == bg for x in range(0, w, 7)):
         y -= 1
     if y < h - 30:
-        im.crop((0, 0, w, min(h, y + 24))).save(p)
+        im = im.crop((0, 0, w, min(h, y + 24)))
+    im.quantize(colors=64, method=0, dither=0).save(p, optimize=True)  # method=0 MEDIANCUT
