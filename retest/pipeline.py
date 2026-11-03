@@ -4,7 +4,7 @@ import shutil
 import threading
 import traceback
 
-from . import agent, evidence, ingest, report, store
+from . import agent, evidence, ingest, report, slim, store
 
 _running: dict[str, threading.Thread] = {}
 _stop_flags: set[str] = set()
@@ -121,8 +121,26 @@ def _finalize(pid: str, work, data: dict) -> None:
 
     store.update(pid, stage="report")
     report.build(pid, findings, data.get("platform") or {}, cleanup)
-    zp = report.package(pid, findings)
     (d / "final_findings.json").write_text(json.dumps(findings, ensure_ascii=False, indent=2))
+
+    # 精簡版：對抗覆核＋同根因合併 pass（模型）→ renderer。失敗則降級，交付包仍照常出，只是不含精簡版。
+    _check_stop(pid)
+    store.update(pid, stage="slim")
+    try:
+        r = agent.run_merge(pid, work)
+        sp = slim.load_and_build(pid) if r.get("ok") else None
+        if sp:
+            store.log(pid, f"🧩 精簡版完成：{sp.name}")
+        elif r.get("blocked"):
+            store.log(pid, f"⚠️ 精簡版合併 pass 未完成（{r['blocked']}），交付包不含精簡版")
+        else:
+            store.log(pid, "⚠️ 精簡版合併 pass 未產出 clusters.json，交付包不含精簡版")
+    except InterruptedError:
+        raise
+    except Exception as e:
+        store.log(pid, f"⚠️ 精簡版產製失敗（{e}），交付包不含精簡版")
+
+    zp = report.package(pid, findings)
     summary = {s: sum(1 for f in findings if f["final_status"] == s) for s in report.STATUS_CLASS}
     summary["total"] = len(findings)
     store.update(pid, stage="done", summary=summary, zip_name=zp.name)

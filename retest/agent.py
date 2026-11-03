@@ -112,37 +112,13 @@ def _render(ev: dict) -> list[str]:
     return out
 
 
-def run(pid: str, work: Path, resume: bool = False) -> dict:
-    """執行 Claude，回傳 {ok, blocked, result_text, session_id}。"""
-    cfg = store.load_config()
-    d = store.pdir(pid)
-    prompt = "請閱讀當前目錄的 TASK.md 並完整執行其中的複測任務。"
-    if resume:
-        pocs = sorted(p.name for p in (work / "pocs").glob("*.sh")) if (work / "pocs").exists() else []
-        if (work / "findings.json").exists():
-            prompt += "注意：findings.json 已存在，這是中斷後的續跑，請接續未完成的項目，不要重做已完成且有 POC 的項目。"
-        elif pocs:
-            prompt += (f"注意：這是中斷後的續跑。先前已完成 {len(pocs)} 支 POC（在 pocs/：{', '.join(pocs)}），"
-                       "以及 scratch/ 下的工作筆記（如 master_findings.md）。請**先盤點既有 POC 與筆記**，"
-                       "接續完成剩餘漏洞的複測，**不要重做已經有 POC 的項目**（尤其是會在目標上重複建帳號/寫入的），"
-                       "然後把全部結果彙整寫出 findings.json。")
-    cmd = [
-        cfg["claude_bin"], "-p", prompt,
-        "--model", cfg["model"], "--effort", cfg["effort"],
-        "--output-format", "stream-json", "--verbose",
-        "--permission-mode", "acceptEdits",
-        "--allowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite",
-        "--disallowedTools", "WebFetch", "WebSearch",
-        "--settings", str(work / ".claude" / "retest-settings.json"),
-        "--add-dir", str(d / "input"), str(d / "input_text"),
-    ]
-    store.log(pid, f"啟動 Claude：model={cfg['model']} effort={cfg['effort']}")
-    raw = open(d / "agent.jsonl", "a", encoding="utf-8")
-    proc = subprocess.Popen(cmd, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            stdin=subprocess.DEVNULL, text=True, start_new_session=True,
-                            env={**os.environ, "POC_COLOR": "1", **proxy_env(store.get(pid).get("proxy"))})
+def _stream(pid: str, cmd: list[str], cwd: Path, env: dict, jsonl: Path, timeout_min: int) -> dict:
+    """跑 Claude CLI、把 stream-json 轉進度日誌，回傳 {ok, blocked, result_text, session_id}。"""
+    raw = open(jsonl, "a", encoding="utf-8")
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, text=True, start_new_session=True, env=env)
     _procs[pid] = proc
-    deadline = time.time() + cfg["agent_timeout_min"] * 60
+    deadline = time.time() + timeout_min * 60
     result = {"ok": False, "blocked": None, "result_text": "", "session_id": None}
     try:
         for line in proc.stdout:
@@ -167,7 +143,7 @@ def run(pid: str, work: Path, resume: bool = False) -> dict:
             if time.time() > deadline:
                 store.log(pid, "⏱️ 超過時限，終止 Claude")
                 stop(pid)
-                result["blocked"] = "超過 agent_timeout_min 時限"
+                result["blocked"] = "超過時限"
                 break
         proc.wait()
     finally:
@@ -176,6 +152,55 @@ def run(pid: str, work: Path, resume: bool = False) -> dict:
     if proc.returncode not in (0, None) and not result["result_text"]:
         result["blocked"] = result["blocked"] or f"Claude 結束碼 {proc.returncode}"
     return result
+
+
+def run(pid: str, work: Path, resume: bool = False) -> dict:
+    """執行 Claude 複測主階段，回傳 {ok, blocked, result_text, session_id}。"""
+    cfg = store.load_config()
+    d = store.pdir(pid)
+    prompt = "請閱讀當前目錄的 TASK.md 並完整執行其中的複測任務。"
+    if resume:
+        pocs = sorted(p.name for p in (work / "pocs").glob("*.sh")) if (work / "pocs").exists() else []
+        if (work / "findings.json").exists():
+            prompt += "注意：findings.json 已存在，這是中斷後的續跑，請接續未完成的項目，不要重做已完成且有 POC 的項目。"
+        elif pocs:
+            prompt += (f"注意：這是中斷後的續跑。先前已完成 {len(pocs)} 支 POC（在 pocs/：{', '.join(pocs)}），"
+                       "以及 scratch/ 下的工作筆記（如 master_findings.md）。請**先盤點既有 POC 與筆記**，"
+                       "接續完成剩餘漏洞的複測，**不要重做已經有 POC 的項目**（尤其是會在目標上重複建帳號/寫入的），"
+                       "然後把全部結果彙整寫出 findings.json。")
+    cmd = [
+        cfg["claude_bin"], "-p", prompt,
+        "--model", cfg["model"], "--effort", cfg["effort"],
+        "--output-format", "stream-json", "--verbose",
+        "--permission-mode", "acceptEdits",
+        "--allowedTools", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite",
+        "--disallowedTools", "WebFetch", "WebSearch",
+        "--settings", str(work / ".claude" / "retest-settings.json"),
+        "--add-dir", str(d / "input"), str(d / "input_text"),
+    ]
+    store.log(pid, f"啟動 Claude：model={cfg['model']} effort={cfg['effort']}")
+    env = {**os.environ, "POC_COLOR": "1", **proxy_env(store.get(pid).get("proxy"))}
+    return _stream(pid, cmd, work, env, d / "agent.jsonl", cfg["agent_timeout_min"])
+
+
+def run_merge(pid: str, work: Path) -> dict:
+    """精簡版合併 pass：讀 final_findings.json + POC log 做對抗覆核＋同根因合併，
+    寫出 output/clusters.json。本機唯讀分析，不走代理、不碰目標。"""
+    cfg = store.load_config()
+    d = store.pdir(pid)
+    (d / "MERGE.md").write_text((ASSETS / "MERGE.md").read_text())
+    cmd = [
+        cfg["claude_bin"], "-p", "請閱讀當前目錄的 MERGE.md 並完整執行，產出 output/clusters.json。",
+        "--model", cfg["model"], "--effort", cfg["effort"],
+        "--output-format", "stream-json", "--verbose",
+        "--permission-mode", "acceptEdits",
+        "--allowedTools", "Bash", "Read", "Write", "Glob", "Grep", "TodoWrite", "Task",
+        "--disallowedTools", "WebFetch", "WebSearch",
+        "--settings", str(work / ".claude" / "retest-settings.json"),
+    ]
+    store.log(pid, f"啟動精簡版合併 pass：model={cfg['model']} effort={cfg['effort']}")
+    env = {**os.environ, "POC_COLOR": "1"}  # 純本機分析，不注入 SOCKS 代理
+    return _stream(pid, cmd, d, env, d / "merge.jsonl", cfg["agent_timeout_min"])
 
 
 def stop(pid: str) -> bool:

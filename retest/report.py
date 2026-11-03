@@ -208,6 +208,8 @@ def package(pid: str, findings: list[dict]) -> Path:
     lib_body = re.sub(r'^#![^\n]*\n', '', lib_text, count=1)  # 去掉 shebang，避免檔中二次出現
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(out / "report.html", "report.html")
+        if (out / "report_slim.html").exists():  # 精簡版（對抗覆核＋同根因合併後），有才收
+            z.write(out / "report_slim.html", "report_slim.html")
         for p in sorted((work / "pocs").glob("*")):
             if p.is_file():
                 txt = p.read_text(encoding="utf-8", errors="replace")
